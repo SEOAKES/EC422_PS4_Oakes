@@ -106,3 +106,16 @@ forecast::dm.test(liquor_errs$arima, liquor_errs$snaive, h = 1, power = 2)
 
 # It's clear that the ARIMA model forecasts much better than the ETS and SNAIVE models. If I were the liquor store chain, I would use ARIMA!
 
+liquor_combo_fc <- liquor_cv_fit |>
+  mutate(combo = (arima + ets) / 2) |>
+  forecast(h = 1)
+
+liquor_combo_fc |>
+  accuracy(liquor, measures = list(RMSE = RMSE, MAE = MAE))
+
+# Compared to the models that go into it, combo is less accurate than ARIMA but more accurate than ETS. It's clear that ETS is inaccurate enough to make it worth dropping. 
+
+cor(liquor_errs$arima, liquor_errs$ets)
+
+# Since the difference in forecasting ability between ARIMA and ETS is significant, and their forecast errors are highly correlated (correlation= 0.878), it makes sense that the combination of the two models did not beat ARIMA. Not only is ETS significantly worse than ARIMA, meaning that combining it with ARIMA would only create less accurate point forecasts, the errors are highly correlated, meaning that ETS is not making up for any of the forecast errors ARIMA already has and is only making them worse.
+
