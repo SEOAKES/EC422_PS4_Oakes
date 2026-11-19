@@ -119,3 +119,114 @@ cor(liquor_errs$arima, liquor_errs$ets)
 
 # Since the difference in forecasting ability between ARIMA and ETS is significant, and their forecast errors are highly correlated (correlation= 0.878), it makes sense that the combination of the two models did not beat ARIMA. Not only is ETS significantly worse than ARIMA, meaning that combining it with ARIMA would only create less accurate point forecasts, the errors are highly correlated, meaning that ETS is not making up for any of the forecast errors ARIMA already has and is only making them worse.
 
+qd_raw <- read_csv("data/fredqd_2026-09.csv", show_col_types = FALSE) |>
+  slice(-(1:2))
+
+growth <- function(x) 100 * difference(log(x))
+
+qd <- qd_raw |>
+  mutate(date = as.Date(sasdate, "%m/%d/%Y")) |>
+  transmute(date,
+            gdp    = growth(GDPC1),     # real GDP
+            cons   = growth(PCECC96),   # real consumption
+            inv    = growth(GPDIC1),    # real investment
+            emp    = growth(PAYEMS),    # payroll employment
+            infl   = growth(GDPCTPI),   # GDP price index
+            unrate = difference(UNRATE),     # unemployment rate
+            ffr    = difference(FEDFUNDS),   # federal funds rate
+            gs10   = difference(GS10)) |>    # 10-year Treasury yield
+  filter(date >= as.Date("1960-03-01"), date <= as.Date("2019-12-01"))
+
+y <- qd |> select(-date) |> as.matrix()
+
+nrow(y)
+head(y)
+
+N <- nrow(y)
+origins <- 120:(N - 1)
+actual <- y[121:N, ]
+
+# We will produce 119 forecasts for each variable. The date of the first forecast is 1960 Q1, and the date of the last forecast is 2019 Q4.
+
+var_ols_fc <- function(z, p) {
+  e <- embed(z, p + 1)            # columns: y_t, then its lags 1 to p
+  M <- ncol(z)                    # number of variables
+  B <- coef(lm(e[, 1:M] ~ e[, -(1:M)]))
+  x <- c(1, t(z[nrow(z):(nrow(z) - p + 1), ]))   # constant, latest p lags
+  x %*% B
+}
+
+fc_var1 <- NULL
+fc_var4 <- NULL
+for (T in origins) {
+  fc_var1 <- rbind(fc_var1, var_ols_fc(y[1:T, ], 1))
+  fc_var4 <- rbind(fc_var4, var_ols_fc(y[1:T, ], 4))
+}
+
+rmse_by_var <- function(f) sqrt(colMeans((actual - f)^2))
+
+rmse_by_var(fc_var1)
+rmse_by_var(fc_var4)
+
+# It looks like the VAR(1) model forecasts better for each of the eight variable except inflation, where there is only a very small difference between the VAR(1) and VAR(4). The smaller model probably forecasts better because it has fewer parameters and thus fewer chances to make estimation errors that drives up the RMSE.
+
+# lambda = 0.3
+
+bvar_cv <- function(lambda) {
+  pr <- bv_priors(hyper = "lambda",
+                  mn = bv_mn(lambda = bv_lambda(mode = lambda, sd = 0.4,
+                                                min = 0.999 * lambda,
+                                                max = 1.001 * lambda),
+                             b = 0))
+  fc <- NULL
+  for (T in origins) {
+    fit_T <- bvar(y[1:T, ], lags = 4, priors = pr,
+                  n_draw = 2000, n_burn = 1000, verbose = FALSE)
+    x <- c(1, t(y[T:(T - 3), ]))         # constant and 4 lags of each variable
+    fc <- rbind(fc, x %*% coef(fit_T))   # forecast of y_{T+1}
+  }
+  fc
+}
+
+set.seed(422)
+fc_bvar_03 <- bvar_cv(0.3)
+saveRDS(fc_bvar_03, "results/fc_bvar_03.rds")
+
+# lambda = 0.05
+
+set.seed(422)
+fc_bvar_005 <- bvar_cv(0.05)
+saveRDS(fc_bvar_005, "results/fc_bvar_005.rds")
+
+# Results in a kable
+
+var_results <- tibble(
+  Variable = colnames(y),
+  `VAR(1)` = rmse_by_var(fc_var1),
+  `VAR(4)` = rmse_by_var(fc_var4),
+  `BVAR(4), lambda = 0.3` = rmse_by_var(fc_bvar_03),
+  `BVAR(4), lambda = 0.05` = rmse_by_var(fc_bvar_005)
+)
+
+saveRDS(var_results, "results/var_results.rds")
+
+var_results |> knitr::kable(digits = 3)
+
+# BVAR(4) when lambda = 0.3 forecasts better for all variable when compared to VAR(4). What explains this difference is BVAR shrinking down the effects of each variable by biasing them towards zero, thus shaving away some of the estimation bias that may have come from fitting meaningless noise.
+# However, BVAR(4) is still less accurate overall than VAR(1), except for the real investment, inflation, 10-year Treasury yield variables, and the differences between these are relatively smaller except for the real investment variable.
+# For the most part, shrinking the variables more aggressively in the BVAR model created forecasts that were more accurate then the VAR(4) model, but the tighter lambda was actually less accurate that the looser lambda and the VAR(1). It seems that just shrinking more aggressively does not create a more accurate model for these data. Though I don't know if I'd say that the winner's RMSE here would be a fair estimate of how accurate it will forecast in the future... elaborate.
+
+e_var4 <- actual[, "gdp"] - fc_var4[, 1]
+e_bvar <- actual[, "gdp"] - fc_bvar_03[, 1]
+
+forecast::dm.test(e_var4, e_bvar, h = 1, power = 2)
+
+# The difference in forecasting errors for GDP growth between VAR(4) and BVAR(4) when lambda = 0.3 is significant. 
+
+e_var4 <- actual[, "unrate"] - fc_var4[, 6]
+e_bvar <- actual[, "unrate"] - fc_bvar_03[, 6]
+
+forecast::dm.test(e_var4, e_bvar, h = 1, power = 2)
+
+# However, the difference for unemployment rate growth between the two is NOT significant at the 5% or 1% significance level (it would be at the 10% significance level). This tells me that one model is not consistently better than the other, and that their errors might not be completely correlated. Since there were even more inconsistencies between other models, I'd want to check each one. Additionally, it might not be a bad idea to try to combine the results of a few models and see if they can beat out VAR(1).
+
