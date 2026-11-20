@@ -14,23 +14,153 @@ editor: visual
 
 **GitHub repo: <https://github.com/SEOAKES/EC422_PS4_Oakes>**
 
-## Quarto
+## ARIMA vs. ETS
 
-Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+Include the plots, model reports, accuracy table, DM test results, and written answers requested in Part 2.
 
-## Running Code
+Supposing that I'm an employee at a liquor store chain and I must forecast next month's U.S. sales to plan inventory, I've come up with some forecasting models and evaluated their accuracy against each other to determine the best model for predicting sales next month. The following sections compare the forecasting abilities of an ARIMA model, an ETS model, and their performance against the benchmark seasonal random walk (SNAIVE) model.
 
-When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
-
-```{r}
-1 + 1
-```
-
-You can add options to executable code like this
+First, we'll load in the data: `MRTSSM4453USN`, which is retail sales at beer, wine, and liquor stores in the U.S., collected monthly and disseminated by FRED.
 
 ```{r}
 #| echo: false
-2 * 2
+
+liquor_raw <- read_csv(
+  "data/MRTSSM4453USN.csv",
+  na = ".",
+  col_types = cols(
+    observation_date = col_date(format = "%Y-%m-%d"),
+    MRTSSM4453USN = col_double()
+  )
+)
+
+liquor <- liquor_raw |>
+  transmute(Month = yearmonth(observation_date), sales = MRTSSM4453USN) |>
+  as_tsibble(index = Month) |>
+  filter(Month <= yearmonth("2019 Dec"))
 ```
 
-The `echo: false` option disables the printing of code (only output is displayed).
+Then, we'll plot `sales` and the natural log of `sales` in a season plot to get a sense of the trend and seasonal pattern.
+
+```{r}
+#| echo: false
+
+liquor |> 
+  autoplot(sales) +
+  labs(
+    title = "Monthly sales at beer, wine, and liquor stores",
+    subtitle = "Data from U.S. Census Bureau's monthly retail trade survey, accessed via FRED",
+    x = "Date (Month and year)", 
+    y = "Retail sales, in millions of dollars") +
+  theme_minimal()
+
+liquor |> 
+  gg_season(log(sales)) +
+  labs(
+    title = "Monthly sales at beer, wine, and liquor stores",
+    subtitle = "Data from U.S. Census Bureau's monthly retail trade survey, accessed via FRED",
+    x = "Month", 
+    y = "Logged retail sales (originally in millions of dollars)")
+```
+
+The level of `sales` is trending up over time. The data are also very clearly seasonal, where the month with the highest sales is December and the month with the lowest sales is January. The seasonal swings do grow with the level of the series, as seen in the plot of the data in levels (the first plot), which suggests that modeling a logged version of the data is worth it because logging evens out those swings across time in the series and allows us to see the real changes in the data better.
+
+Next, we want to build forecasting models to try to predict what the series will look like next month. To do so, we'll be creating an ARIMA model and an ETS model, both using the log of `sales`. The specifications of the models will be determined by fitting both models over the entire sample period. The following code tells us what model specifications are chosen by `fable`.
+
+```{r}
+#| echo: false
+
+liquor_fit <- liquor |>
+  model(arima = ARIMA(log(sales)),
+        ets   = ETS(log(sales)))
+
+liquor_fit |> select(arima) |> report()
+liquor_fit |> select(ets) |> report()
+```
+
+For the ETS model, the chosen specification was ETS(A, A, A). This means that this model has an additive trend component, an additive seasonal component, and an additive error component. For the ARIMA model, the chosen specification was ARIMA(1, 0, 2)(2, 1, 1)\[12\] with drift. (I'm not sure what the "\[12\] w/ drift" part means.) These specifications tell us that the model contains 1 lag of our target variable, sales, 2 lags of the error term, 2 lags of the seasonal target variable, 1 lag of the seasonal error term, and that the model differenced the data seasonally one time.
+
+Now that we've estimated the specifications of the models, we want to look a little more closely at the residuals of the ARIMA model to determine whether those residuals are white noise with some plots and a Ljung-Box test.
+
+```{r}
+#| echo: false
+
+liquor_fit |> select(arima) |> gg_tsresiduals()
+
+liquor_fit |>
+  select(arima) |>
+  augment() |>
+  features(.innov, ljung_box, lag = 24, dof = 6)
+```
+
+Based on the plots above, the residuals do mostly look like white noise! The bar plot shows them centered on zero, and they don't seem to be autocorrelated in the plot of the ACF. While there are some significant error terms, they don't seem to be connected to each other. The Ljung-Box test also resulted in a LB-stat of 120.39 and a p-value of approximately zero, so no statistically significant autocorrelation in the residuals of the ARIMA model were detected.
+
+With an assurance that the ARIMA does not have autocorrelated residuals, we're free to move on to the horse race, where we'll compare the forecast accuracy of the ARIMA, ETS, and SNAIVE models against each other using their RMSE and MAE. We'll do so by running an expanding-window TS-CV where the first training sample includes 10 years of data. The code chunk below won't run the TS-CV, as that is very time-consuming, but it will pull up the saved results of the TS-CV when it was run the first time.
+
+In this TS-CV, if my math is right, around 214 forecast origins will be considered? Or maybe it's 216 instead. Somewhere around there. I apologize for not having clear answer.
+
+```{r}
+#| echo: false
+
+liquor_cv_fit <- readRDS("results/liquor_cv_fit.rds")
+
+liquor_cv_fc <- liquor_cv_fit |>
+  forecast(h = 1)
+
+liquor_cv_fc |>
+  accuracy(liquor, measures = list(RMSE = RMSE, MAE = MAE)) |>
+  knitr::kable(digits = 2)
+```
+
+The date of the first forecast is January 2002, and the date of the last forecast is December 2019.
+
+The model that forecasts the most accurately is the ARIMA model, with an RMSE of 81.93 and a MAE of 65.65. Both the RMSE and the MAE of the ARIMA model are less than the same accuracy metrics for the ETS and SNAIVE models, so both metrics agree that ARIMA is more accurate in forecasting `sales`.
+
+However, without further testing, we can't say for sure that the ARIMA model's forecast accuracy being better than ETS or SNAIVE is statistically significant. So, we'll run ARIMA and ETS, then ARIMA and SNAIVE, through a Diebold-Mariano test with squared error loss to test for equal forecast accuracy.
+
+```{r}
+#| echo: false
+
+liquor_errs <- liquor_cv_fc |>
+  as_tibble() |>
+  left_join(as_tibble(liquor) |> select(Month, actual = sales),
+            by = "Month") |>
+  mutate(e = actual - .mean) |>
+  select(Month, .model, e) |>
+  pivot_wider(names_from = .model, values_from = e)
+
+forecast::dm.test(liquor_errs$arima, liquor_errs$ets, h = 1, power = 2)
+
+liquor_errs <- liquor_cv_fc |>
+  as_tibble() |>
+  left_join(as_tibble(liquor) |> select(Month, actual = sales),
+            by = "Month") |>
+  mutate(e = actual - .mean) |>
+  select(Month, .model, e) |>
+  pivot_wider(names_from = .model, values_from = e)
+
+forecast::dm.test(liquor_errs$arima, liquor_errs$snaive, h = 1, power = 2)
+
+```
+
+When comparing the ARIMA model vs. the ETS model, the DM-stat was -2.9062, and the p-value was 0.004042. Since the p-value is less than 0.05 (and 0.01), we can reject the null hypothesis of the models having equal forecast accuracy at the 5% and 1% significance levels.
+
+When comparing the ARIMA model vs. the SNAIVE model, the DM-stat was -10.755, and the p-value was less than 2.2e-16. With an even smaller p-value, it's clear that the two models do *not* have equal forecast accuracy at the 5% and 1% significance levels.
+
+With all these calculations, we can conclude that the best model we can use among the ARIMA, ETS, and SNAIVE models to forecast next month's retail sales is the ARIMA model.
+
+## Forecast Combination
+
+Include the table and written answers requested in Part 3.
+
+## VAR vs. BVAR
+
+Include the RMSE table, DM test results, and written answers requested in Part 4. To include the DM test results without re-running the horse race, you may save the test output with `saveRDS()` in your script, or report the numbers in your text.
+
+## Factor Model
+
+Include the plot, results, and written answers requested in Part 5.
+
+## Reflection
+
+A short paragraph (4–6 sentences) on the problem set as a whole. You ran several horse races. What did you learn about when simple models are hard to beat? Which ideas did you see more than once? (Hint: think about what shrinkage, equal weights, and factors have in common.)
