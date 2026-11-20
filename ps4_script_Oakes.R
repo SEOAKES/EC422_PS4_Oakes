@@ -330,4 +330,3 @@ direct_race <- function(series, h = 12, r = 3) {
 direct_race("CPIAUCSL")
 
 # The factors did improve the forecast of 12-month CPI inflation! From the AR to the FA, the RMSE changes by (1.89-2.11)/2.11 = -0.104, or about a 10.4% reduction in RMSE. And the difference is significantly significant too, since the p-value from the DM test is so small!
-

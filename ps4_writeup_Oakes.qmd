@@ -437,4 +437,6 @@ It turns out that the inclusion of the factors does improve the forecast of 12-m
 
 ## Reflection
 
-A short paragraph (4–6 sentences) on the problem set as a whole. You ran several horse races. What did you learn about when simple models are hard to beat? Which ideas did you see more than once? (Hint: think about what shrinkage, equal weights, and factors have in common.)
+Simple models can be hard to beat when you add many parameters into your model and don't find a good way to shrink their estimation errors. Shrinkage, equal weights, and factors are all methods of adding flexibility to models without driving up the amount of estimation error. What simple models lose with having approximation error is often much less extreme than what complex models add with estimation error, so we're always trying to find ways to dampen the effects of those errors. Of course, this isn't always successful, which is why it's important to both keep in mind simple models and try to find creative ways of forecasting economic data with all sorts of models.
+
+Shrinkage dampens the effect of parameters, equal weights allow the strengths of multiple models to make up for each others' weaknesses by combining several point forecasts into one, and factors try to include the effects of many series in a model without adding in all the parameters of those series individually. Each approach has its own pros and cons in their methods of reducing estimation error, so it's also key to choose methods based on a careful evaluation of your set of data.
