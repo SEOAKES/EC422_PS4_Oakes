@@ -295,6 +295,146 @@ However, the difference for unemployment rate growth between the two is NOT sign
 
 ## Factor Model
 
+As always, new horizons await us. Now, we want to consider how a factor model might improve the forecast accuracy of an AR(1) model, using data from a September 2026 vintage of FRED-MD, which includes 121 monthly macroeconomic series.
+
+Each series will be transformed as recommended by McCracken and Ng, who maintain the database of these series in FRED-MD. Transformations include taking the first difference, taking the second difference, logging, turning the series into a measure of growth rates (logging and then differencing), and turning the series into a measure of the change in the growth rate (logging and then differencing twice).
+
+```{r}
+#| echo: false
+
+md_raw <- read_csv("data/fredmd_2026-09.csv", show_col_types = FALSE)
+tcode <- unlist(md_raw[1, -1])
+md <- md_raw[-1, ] |> mutate(date = as.Date(sasdate, "%m/%d/%Y"))
+
+transform_series <- function(x, code) {
+  d <- function(v) c(NA, diff(v))
+  switch(as.character(code),
+         "1" = x,                      # level
+         "2" = d(x),                   # first difference
+         "3" = d(d(x)),                # second difference
+         "4" = log(x),                 # log
+         "5" = 100 * d(log(x)),        # growth rate
+         "6" = 100 * d(d(log(x))),     # change in the growth rate
+         "7" = d(x / dplyr::lag(x) - 1))
+}
+
+fm <- map2_dfc(md[names(tcode)], tcode, transform_series) |>
+  mutate(date = md$date, .before = 1) |>
+  filter(date >= as.Date("1960-03-01"), date <= as.Date("2019-12-01"))
+
+fm <- fm[, colSums(is.na(fm)) == 0]
+
+dim(fm)
+
+tcode[c("INDPRO", "PAYEMS", "CPIAUCSL", "FEDFUNDS")]
+```
+
+In total, we have 718 rows of data and 122 columns (each series plus the date). INDPRO and PAYEMS were both transformed into measures of the growth rate for their respective series, CPIAUCSL was transformed into a measure of the change in the growth rate, and FEDFUNDS was differenced once. Why is the transformation type different for FEDFUNDS and INDPRO. FEDFUNDS just needed its trend taken out and doesn't have any seasonal swings that would make the data harder to parse. INDPRO, on the other hand, definitely has seasonal swings that would grow with the level of the data, so logging before differencing makes sense.
+
+Next, we want to begin creating our factors by principal components and understand how much of the variation in the data they explain.
+
+```{r}
+#| echo: false
+
+Z <- fm |> select(-date) |> as.matrix()
+
+pc <- prcomp(scale(Z))
+
+summary(pc)$importance[, 1:5]
+```
+
+The first three factors explain about 0.150 + 0.074 + 0.071 = 0.295, which is around 29.5% of the variation in the data.
+
+Let's take a look at a plot of the first factor, which explains the most variation in the data.
+
+```{r}
+#| echo: false
+
+F1 <- pc$x[, 1] * sign(cor(pc$x[, 1], fm$INDPRO))
+
+tibble(date = fm$date, F1 = F1) |>
+  ggplot(aes(date, F1)) +
+  geom_line() +
+  labs(title = "First Factor from FRED-MD", x = NULL, y = NULL) +
+  theme_minimal()
+```
+
+Then, we're going to find the eight series that are most correlated with the first two factors.
+
+```{r}
+#| echo: false
+
+sort(abs(cor(pc$x[, 1], Z))[1, ], decreasing = TRUE)[1:8]
+sort(abs(cor(pc$x[, 2], Z))[1, ], decreasing = TRUE)[1:8]
+```
+
+The series most correlated with the first factor are: all employees in non-farm jobs (PAYEMS), industrial production in manufacturing (IPMANSICS), all employees in goods-producing industries (USGOOD), industrial production index (INDPRO), all employees in manufacturing (MANEMP), industrial production of final products and nonindustrial supplies (IPFPNSS), capacity utilization of manufacturing (CUMFNS), and all employees in durable goods (DMANEMP).
+
+The series most correlated with the second factor are: CPI of commodities (CUSR0000SAC), personal consumption expenditures: non-durable goods (DNDGRG3M086SBEA), CPI of all items less shelter (CUSR0000SA0L2), CPI of all items (CPIAUCSL), CPI of all items less medical care (CUSR0000SA0L5), CPI of transportation (CPITRNSL), personal consumption expenditures: chain-type price index (PCEPI), and CPI of all items less food (CPIULFSL).
+
+Based on this information and the plot produced above, I would say that the first factor captures growth in production and employment. Notice how in the plot, the factor drops during recessions, where both employment and production would be down.
+
+The second factor, then, captures the growth in prices and consumer spending. The series most correlated with this factor are either related to the CPI or personal consumption expenditures.
+
+Now, we want to take the three factors that explain the largest share of the variation in the data and add them to an AR(1) model to compare forecast accuracy against a regular AR(1) model. We will use an expanding-window TS-CV, forecasting one month ahead, with the first training sample going from March 1960 to December 1989.
+
+```{r}
+#| echo: false
+
+ip <- fm$INDPRO
+n <- nrow(Z)
+init <- which(fm$date == as.Date("1989-12-01"))
+
+e_ar <- NULL
+e_fa <- NULL
+for (T in init:(n - 1)) {
+  F_T <- prcomp(scale(Z[1:T, ]))$x[, 1:3]         # factors using data through T
+  d <- data.frame(y_next = ip[2:T], y = ip[1:(T - 1)], F_T[1:(T - 1), ])
+  new <- data.frame(y = ip[T], t(F_T[T, ]))
+  e_ar <- c(e_ar, ip[T + 1] - predict(lm(y_next ~ y, d), new))
+  e_fa <- c(e_fa, ip[T + 1] - predict(lm(y_next ~ ., d), new))
+}
+
+c(RMSE_AR = sqrt(mean(e_ar^2)), RMSE_FA = sqrt(mean(e_fa^2)))
+```
+
+The RMSE for the regular AR(1) model = 0.617 and RMSE with factors = 0.589 (which matches the numbers we got in class). It would be cheating to estimate the factors once with the full sample (which is not what we're doing here; we're re-estimated each factor at each forecast origin using only the data available at the time) because it's a classic case of information leakage to do so! Our model would perform too well in the test sample but we wouldn't have a sense of how well it would forecast a real out-of-sample period.
+
+Let's now find out whether the inclusion of factors in the AR(1) model improve the forecast of 12-month CPI inflation.
+
+```{r}
+#| echo: false
+
+direct_race <- function(series, h = 12, r = 3) {
+  lv <- md |>
+    mutate(log_x = log(.data[[series]]),
+           g = 100 * (log_x - lag(log_x))) |>
+    filter(date >= as.Date("1960-03-01"), date <= as.Date("2019-12-01"))
+  yh <- 100 * (lead(lv$log_x, h) - lv$log_x)      # growth over the next h months
+  g  <- lv$g                                      # growth over the latest month
+  
+  e_ar <- NULL
+  e_fa <- NULL
+  for (T in init:(n - h)) {
+    F_T <- prcomp(scale(Z[1:T, ]))$x[, 1:r, drop = FALSE]
+    i <- 1:(T - h)
+    d <- data.frame(yh = yh[i], g = g[i], F_T[i, , drop = FALSE])
+    new <- data.frame(g = g[T], F_T[T, , drop = FALSE])
+    e_ar <- c(e_ar, yh[T] - predict(lm(yh ~ g, d), new))
+    e_fa <- c(e_fa, yh[T] - predict(lm(yh ~ ., d), new))
+  }
+  tibble(series, forecasts = length(e_ar),
+         RMSE_AR = sqrt(mean(e_ar^2)), RMSE_FA = sqrt(mean(e_fa^2)),
+         MAE_AR = mean(abs(e_ar)), MAE_FA = mean(abs(e_fa)),
+         DM_pvalue = forecast::dm.test(e_ar, e_fa, h = h, power = 2,
+                                       varestimator = "bartlett")$p.value)
+}
+
+direct_race("CPIAUCSL")
+```
+
+It turns out that the inclusion of the factors does improve the forecast of 12-month CPI inflation. From the AR(1) to the AR(1) with factors (FA), the RMSE changes by (1.89-2.11)/2.11 = -0.104, or about a 10.4% reduction in RMSE. And the difference in forecast accuracy is statistically significant as well, since the p-value from the DM test is smaller than 0.05 and 0.01.
+
 ## Reflection
 
 A short paragraph (4–6 sentences) on the problem set as a whole. You ran several horse races. What did you learn about when simple models are hard to beat? Which ideas did you see more than once? (Hint: think about what shrinkage, equal weights, and factors have in common.)
