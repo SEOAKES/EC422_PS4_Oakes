@@ -16,8 +16,6 @@ editor: visual
 
 ## ARIMA vs. ETS
 
-Include the plots, model reports, accuracy table, DM test results, and written answers requested in Part 2.
-
 Supposing that I'm an employee at a liquor store chain and I must forecast next month's U.S. sales to plan inventory, I've come up with some forecasting models and evaluated their accuracy against each other to determine the best model for predicting sales next month. The following sections compare the forecasting abilities of an ARIMA model, an ETS model, and their performance against the benchmark seasonal random walk (SNAIVE) model.
 
 First, we'll load in the data: `MRTSSM4453USN`, which is retail sales at beer, wine, and liquor stores in the U.S., collected monthly and disseminated by FRED.
@@ -147,11 +145,35 @@ When comparing the ARIMA model vs. the ETS model, the DM-stat was -2.9062, and t
 
 When comparing the ARIMA model vs. the SNAIVE model, the DM-stat was -10.755, and the p-value was less than 2.2e-16. With an even smaller p-value, it's clear that the two models do *not* have equal forecast accuracy at the 5% and 1% significance levels.
 
-With all these calculations, we can conclude that the best model we can use among the ARIMA, ETS, and SNAIVE models to forecast next month's retail sales is the ARIMA model.
+With all these calculations, we can conclude that the best model we can use among the ARIMA, ETS, and SNAIVE models to forecast next month's liquor store retail sales is the ARIMA model.
 
 ## Forecast Combination
 
-Include the table and written answers requested in Part 3.
+However, we can't just choose ARIMA yet! Why, you may be asking? It's possible that by combining the point forecasts of our ARIMA and ETS models, we might get more accurate point forecasts overall... as long as one model isn't so much worse than the other. To find out whether combining the models is worth it for forecasting, we'll create an equal-weight combination of ARIMA and ETS.
+
+```{r}
+#| echo: false
+
+liquor_combo_fc <- liquor_cv_fit |>
+  mutate(combo = (arima + ets) / 2) |>
+  forecast(h = 1)
+
+liquor_combo_fc |>
+  accuracy(liquor, measures = list(RMSE = RMSE, MAE = MAE)) |>
+  knitr::kable(digits = 2)
+```
+
+Compared to the models that go into it, `combo` is less accurate than ARIMA but more accurate than ETS. It's clear that ETS is inaccurate enough to make it worth dropping in the combination, leaving us again with the ARIMA model on its own.
+
+Why might this be the case? Combining models is most helpful for creating more accurate point forecasts when the forecast errors of the models (in this case, ARIMA and ETS) aren't too similar to each other. What happens when we compute this correlation?
+
+```{r}
+#| echo: false
+
+cor(liquor_errs$arima, liquor_errs$ets)
+```
+
+Well, the correlation between the errors is pretty high. Since the difference in forecasting ability between ARIMA and ETS is significant (as determined in the previous section), and their forecast errors are highly correlated (correlation = 0.878), it makes sense that the combination of the two models did not beat ARIMA. Not only is ETS significantly worse than ARIMA, meaning that combining it with ARIMA would only create less accurate point forecasts, the errors are highly correlated, meaning that ETS is not making up for any of the forecast errors ARIMA already has and is only making them worse.
 
 ## VAR vs. BVAR
 
