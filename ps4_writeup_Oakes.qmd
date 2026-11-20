@@ -23,6 +23,10 @@ First, we'll load in the data: `MRTSSM4453USN`, which is retail sales at beer, w
 ```{r}
 #| echo: false
 
+library(tidyverse)
+library(fpp3)
+library(BVAR)
+
 liquor_raw <- read_csv(
   "data/MRTSSM4453USN.csv",
   na = ".",
@@ -177,11 +181,119 @@ Well, the correlation between the errors is pretty high. Since the difference in
 
 ## VAR vs. BVAR
 
-Include the RMSE table, DM test results, and written answers requested in Part 4. To include the DM test results without re-running the horse race, you may save the test output with `saveRDS()` in your script, or report the numbers in your text.
+Switching our focus from forecasting liquor store retail sales, we now want to work with seasonally adjusted macroeconomic data — a lot of it. In doing so, we'll compare the forecast accuracy of two VAR models and two BVAR models.
+
+Our data is taken from FRED-QD and contains 245 U.S. macroeconomic data series. We will be using a September 2026 vintage of the data specifically. We'll also only be using eight of the series from the data and turning them into measures quarterly of growth rates (between 1960 Q1 and 2019 Q4): GDPC1 (real GDP), PCECC96 (real consumption), GPDIC1 (real investment), PAYEMS (payroll employment), GDPCTPI (GDP price index), UNRATE (unemployment rate), FEDFUNDS (Federal Funds rate), and GS10 (10-year Treasury yield).
+
+```{r}
+#| echo: false
+
+qd_raw <- read_csv("data/fredqd_2026-09.csv", show_col_types = FALSE) |>
+  slice(-(1:2))
+
+growth <- function(x) 100 * difference(log(x))
+
+qd <- qd_raw |>
+  mutate(date = as.Date(sasdate, "%m/%d/%Y")) |>
+  transmute(date,
+            gdp    = growth(GDPC1),     # real GDP
+            cons   = growth(PCECC96),   # real consumption
+            inv    = growth(GPDIC1),    # real investment
+            emp    = growth(PAYEMS),    # payroll employment
+            infl   = growth(GDPCTPI),   # GDP price index
+            unrate = difference(UNRATE),     # unemployment rate
+            ffr    = difference(FEDFUNDS),   # federal funds rate
+            gs10   = difference(GS10)) |>    # 10-year Treasury yield
+  filter(date >= as.Date("1960-03-01"), date <= as.Date("2019-12-01"))
+
+y <- qd |> select(-date) |> as.matrix()
+
+nrow(y)
+head(y)
+
+N <- nrow(y)
+origins <- 120:(N - 1)
+actual <- y[121:N, ]
+```
+
+The firs training sample for our TS-CV will include the first 120 quarters in the data, from 1960 Q1 to 1989 Q4. We'll then compare a VAR(1) model with a VAR(4) model where both models are forecasting each time series value one quarter ahead that is trained on this sample of the data. We will be producing 120 forecasts for each variable. The date of the first forecast is 1990 Q1, and the date of the last forecast is 2019 Q4.
+
+The output of the code chunk below will be the RMSE of each variable for both models in order to compare their forecast accuracy. The top row is the RMSE numbers for the VAR(1) model and the bottom row is the numbers for the VAR(4) model.
+
+```{r}
+#| echo: false
+
+var_ols_fc <- function(z, p) {
+  e <- embed(z, p + 1)            # columns: y_t, then its lags 1 to p
+  M <- ncol(z)                    # number of variables
+  B <- coef(lm(e[, 1:M] ~ e[, -(1:M)]))
+  x <- c(1, t(z[nrow(z):(nrow(z) - p + 1), ]))   # constant, latest p lags
+  x %*% B
+}
+
+fc_var1 <- NULL
+fc_var4 <- NULL
+for (T in origins) {
+  fc_var1 <- rbind(fc_var1, var_ols_fc(y[1:T, ], 1))
+  fc_var4 <- rbind(fc_var4, var_ols_fc(y[1:T, ], 4))
+}
+
+rmse_by_var <- function(f) sqrt(colMeans((actual - f)^2))
+
+rmse_by_var(fc_var1)
+rmse_by_var(fc_var4)
+```
+
+Based on these metrics, it looks like the VAR(1) model forecasts better for each of the eight variable except the GDP price index, where there is only a very small difference between the VAR(1) and VAR(4). The smaller model probably forecasts better because it has fewer parameters and thus fewer chances to make estimation errors that drive up the RMSE.
+
+Now, let's see if BVAR models can perform better than the VAR models. The following code chunk pulls up data from a previously-run TS-CV for BVAR(4) models using the Minnesota prior. One model has lambda = 0.3, and the other has lambda = 0.05 (meaning it shrinks the variable parameter estimates towards zero more aggressively than the model with the larger lambda).
+
+We then compare the RMSE for each model and its variable estimates against each other—both of the VAR models and the BVAR models.
+
+```{r}
+#| echo: false
+
+fc_bvar_03 <- readRDS("results/fc_bvar_03.rds")
+
+fc_bvar_005 <- readRDS("results/fc_bvar_005.rds")
+
+var_results <- readRDS("results/var_results.rds") 
+
+var_results |> knitr::kable(digits = 3)
+
+```
+
+The BVAR(4) model when lambda = 0.3 forecasts better for all variables when compared to the VAR(4) model. What explains this difference is BVAR shrinking down the effects of each variable by biasing them towards zero, thus shaving away some of the estimation bias that may have come from fitting meaningless noise.
+
+However, BVAR(4) is still less accurate overall than VAR(1), except for the real investment, GDP price index, and 10-year Treasury yield variables. While that might seem meaningful, the differences in the RMSE metrics for variables are quite small—the largest difference is in the real investment variable, so that difference might be statistically significant.
+
+For the most part, shrinking the variables more aggressively in the BVAR(4) model created forecasts that were more accurate then the VAR(4) model, but the model with the lower lambda was actually less accurate that the model with the higher lambda *and* the VAR(1) model. (Specifically, the only variable that the lambda = 0.05 model forecast more accurately than the lambda = 0.3 model and VAR(1) model was the growth of the Federal Funds rate.) It seems that simply shrinking more aggressively does not create a more accurate model for these data. Though I don't know if I'd say that the winner's RMSE (the winner is probably the VAR(1) model) here would be a fair estimate of how accurately it will forecast in the future. We still haven't compared the VAR(1) model to any benchmark forecasting models, nor is it really clear with only this information whether these RMSE metrics are even competitive in the real forecasting world. There are many things we could still try out with these data (like an even looser prior than 0.3 for the BVAR model, or something other than the Minnesota prior, etc.) to determine the best forecasting model. Just going off of which RMSE is the smallest doesn't mean much in the grand scheme of things (also, we might get better results if we combine the point forecasts of multiple models—the possibilities are nearly endless).
+
+Let's now test whether the VAR(4) and BVAR(4) with lambda = 0.3 are equally accurate with a Diebold-Mariano test in forecasting GDP growth and the unemployment rate. We want to get a sense of whether the shrinkage the BVAR(4) affords us makes statistically significant differences in forecast accuracy.
+
+```{r}
+#| echo: false
+
+e_var4 <- actual[, "gdp"] - fc_var4[, 1]
+e_bvar <- actual[, "gdp"] - fc_bvar_03[, 1]
+
+forecast::dm.test(e_var4, e_bvar, h = 1, power = 2)
+```
+
+The difference in forecasting errors for GDP growth between VAR(4) and BVAR(4) when lambda = 0.3 is significant!
+
+```{r}
+#| echo: false
+
+e_var4 <- actual[, "unrate"] - fc_var4[, 6]
+e_bvar <- actual[, "unrate"] - fc_bvar_03[, 6]
+
+forecast::dm.test(e_var4, e_bvar, h = 1, power = 2)
+```
+
+However, the difference for unemployment rate growth between the two is NOT significant at the 5% or 1% significance level (it would be at the 10% significance level). This tells me that one model is not consistently better than the other, and that their errors might not be completely correlated. Since there were even more inconsistencies between other models, I'd want to check the statistical significance of each model's forecast accuracy differences. Additionally, it might not be a bad idea to try to combine the results of a few models and see if they can beat out VAR(1). With all this uncertainty, I'm even more confident that we can't immediately conclude that we should choose VAR(1) to forecast our macroeconomic data over all the other models.
 
 ## Factor Model
-
-Include the plot, results, and written answers requested in Part 5.
 
 ## Reflection
 
